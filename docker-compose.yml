@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  retailiq:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: retailiq_app
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_SERVER_HEADLESS=true
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
