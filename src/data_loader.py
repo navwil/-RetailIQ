@@ -152,6 +152,107 @@ def parse_uploaded_file(uploaded_file) -> Tuple[pd.DataFrame, str]:
     return df, summary_str
 
 
+def inspect_and_parse_uploaded_file(uploaded_file) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Parses and deeply inspects a customer-uploaded file (CSV, Excel, or PDF).
+    Returns the parsed DataFrame and a rich verification diagnostics dictionary.
+    """
+    filename = uploaded_file.name
+    file_ext = Path(filename).suffix.lower()
+    file_size_bytes = getattr(uploaded_file, "size", 0)
+
+    # 1. Parse raw
+    if file_ext == ".csv":
+        try:
+            raw_df = pd.read_csv(uploaded_file, encoding="utf-8")
+        except UnicodeDecodeError:
+            uploaded_file.seek(0)
+            raw_df = pd.read_csv(uploaded_file, encoding="ISO-8859-1")
+    elif file_ext in [".xlsx", ".xls"]:
+        raw_df = pd.read_excel(uploaded_file)
+    elif file_ext == ".pdf":
+        reader = PdfReader(uploaded_file)
+        all_lines = []
+        for page in reader.pages:
+            text = page.extract_text()
+            if text:
+                all_lines.extend(text.splitlines())
+
+        rows = []
+        header = None
+        for line in all_lines:
+            line_str = line.strip()
+            if not line_str:
+                continue
+            if "," in line_str:
+                parts = [p.strip() for p in line_str.split(",")]
+            elif "\t" in line_str:
+                parts = [p.strip() for p in line_str.split("\t")]
+            else:
+                parts = [p.strip() for p in re.split(r"\s{2,}", line_str)]
+
+            if len(parts) >= 6:
+                if header is None:
+                    header = parts
+                else:
+                    rows.append(parts)
+
+        if not rows or header is None:
+            raise ValueError(
+                f"Could not automatically detect tabular transaction data in '{filename}'. "
+                f"Please ensure the PDF contains a structured table with InvoiceNo, StockCode, Quantity, etc."
+            )
+        cleaned_rows = []
+        for r in rows:
+            if len(r) == len(header):
+                cleaned_rows.append(r)
+            elif len(r) > len(header):
+                cleaned_rows.append(r[:len(header)])
+            else:
+                cleaned_rows.append(r + [None] * (len(header) - len(r)))
+
+        raw_df = pd.DataFrame(cleaned_rows, columns=header)
+    else:
+        raise ValueError(f"Unsupported file format '{file_ext}'. Supported: CSV, Excel, PDF.")
+
+    original_cols = list(raw_df.columns)
+    
+    # 2. Normalize columns
+    df = normalize_columns(raw_df)
+    valid, missing = validate_columns(df)
+
+    # Track column mapping
+    mapping_records = []
+    for orig, norm in zip(original_cols, df.columns):
+        mapping_records.append({
+            "Original File Header": orig,
+            "Mapped Platform Attribute": norm,
+            "Status": "✅ Mapped" if norm in REQUIRED_COLUMNS else "ℹ️ Preserved"
+        })
+
+    # Basic stats
+    n_rows = len(df)
+    diagnostics = {
+        "filename": filename,
+        "format": file_ext.upper().replace(".", ""),
+        "size_bytes": file_size_bytes,
+        "total_rows": n_rows,
+        "total_columns": len(df.columns),
+        "column_mapping": mapping_records,
+        "is_valid": valid,
+        "missing_required": missing,
+        "null_counts": df.isnull().sum().to_dict(),
+        "duplicate_rows": int(df.duplicated().sum())
+    }
+
+    if not valid:
+        diagnostics["error_message"] = (
+            f"Missing required columns: {missing}. Expected columns: {REQUIRED_COLUMNS}"
+        )
+
+    return df, diagnostics
+
+
 def load_raw_data(
     source_preference: str = "excel",
     custom_path: Optional[Union[str, Path]] = None
